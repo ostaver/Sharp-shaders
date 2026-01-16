@@ -1,1 +1,2 @@
-# Made in shadertoy using GLSL
+# Neon Shader
+Made with GLSL in shadertoy.
