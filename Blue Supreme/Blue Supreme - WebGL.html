@@ -1,0 +1,219 @@
+<!-- TEMPLATE FOR WEB-SITE USE-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Blue Supreme — WebGL</title>
+<!--
+  Blue Supreme — optimized, web-ready build of the Shadertoy shader.
+  Self-contained: no dependencies, no build step. Drop into any page.
+
+  Usage as a full-page background:
+    <canvas id="bluesupreme"></canvas>  +  this script, with CSS position:fixed.
+
+  Tuning knobs live in the fragment shader header (#define / const) and in
+  the CONFIG block at the bottom of this file.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #08050f; overflow: hidden; }
+  /* position:fixed turns the canvas into a full-viewport background layer. */
+  #bluesupreme { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="bluesupreme"></canvas>
+
+<!-- ── Vertex shader: a single fullscreen triangle ─────────────── -->
+<script id="vert" type="x-shader/x-vertex">
+attribute vec2 a_pos;
+void main() { gl_Position = vec4( a_pos, 0.0, 1.0 ); }
+</script>
+
+<!-- ── Fragment shader: the optimized Blue Supreme effect ──────── -->
+<script id="frag" type="x-shader/x-fragment">
+precision highp float;
+
+uniform vec2  u_resolution;
+uniform float u_time;
+
+// Look / quality knobs.
+#define ITERATIONS 8                 // fBm detail: higher = heavier on GPU.
+const float u_baseH = 200.0;         // base hue (degrees).
+const vec3 backgroundColor = vec3( 8.0 / 255.0, 5.0 / 255.0, 15.0 / 255.0 );
+
+float hash( vec2 p ) {
+    float h = dot( p, vec2( 127.1, 311.7 ) );
+    return fract( sin( h ) * 43758.5453123 );
+}
+
+float noise( vec2 p ) {
+    vec2 i = floor( p );
+    vec2 f = fract( p );
+    f = f * f * ( 3.0 - 2.0 * f );
+    float a = hash( i );
+    float b = hash( i + vec2( 1.0, 0.0 ) );
+    float c = hash( i + vec2( 0.0, 1.0 ) );
+    float d = hash( i + vec2( 1.0, 1.0 ) );
+    return mix( mix( a, b, f.x ), mix( c, d, f.x ), f.y );
+}
+
+float fbm( vec2 p ) {
+    float v = 0.0, a = 0.5;
+    vec2 shift = vec2( 100.0 );
+    mat2 rot = mat2( cos( 0.5 ), sin( 0.5 ), -sin( 0.5 ), cos( 0.5 ) );
+    for ( int i = 0; i < ITERATIONS; ++i ) {
+        v += a * noise( p );
+        p  = rot * p * 2.0 + shift;
+        a *= 0.5;
+    }
+    return v;
+}
+
+vec3 hsl2rgb( vec3 hsl ) {
+    vec3 rgb = clamp( abs( mod( hsl.x * 6.0 + vec3( 0.0, 4.0, 2.0 ), 6.0 ) - 3.0 ) - 1.0, 0.0, 1.0 );
+    return hsl.z + hsl.y * ( rgb - 0.5 ) * ( 1.0 - abs( 2.0 * hsl.z - 1.0 ) );
+}
+
+void main() {
+    vec2 fragCoord = gl_FragCoord.xy;
+    vec2 uv = fragCoord / u_resolution;
+
+    // Aspect-corrected, scaled coordinates.
+    vec2 st = vec2( uv.x * ( u_resolution.x / u_resolution.y ), uv.y ) * 2.5;
+
+    float timeSlow = u_time * 0.02;
+    float timeMed  = u_time * 0.035;
+    float timeFast = u_time * 0.05;
+
+    // Multi-layer domain warping for fluid motion.
+    vec2 q1 = vec2( fbm( st + timeMed ),
+                    fbm( st + vec2( 5.2, 1.3 ) + timeFast ) );
+    vec2 q2 = vec2( fbm( st + 3.0 * q1 + vec2( 1.7, 9.2 ) + timeSlow ),
+                    fbm( st + 3.0 * q1 + vec2( 8.3, 2.8 ) + timeMed ) );
+    vec2 r  = vec2( fbm( st + 4.0 * q2 + vec2( 1.7, 9.2 ) + timeSlow * 0.7 ),
+                    fbm( st + 4.0 * q2 + vec2( 8.3, 2.8 ) + timeMed * 0.8 ) );
+
+    float f  = fbm( st + 4.0 * r );
+    float f2 = fbm( st + 3.0 * r + vec2( 3.3, 6.7 ) );
+
+    // Hue: wide variation around the blue base.
+    float hueShift = ( f - 0.5 ) * 24.0 + ( f2 - 0.5 ) * 8.0;
+    float hue = mod( u_baseH + hueShift, 360.0 ) / 360.0;
+
+    float sat   = mix( 0.4, 0.95, clamp( f * 1.4 + f2 * 0.3, 0.0, 1.0 ) );
+    float light = mix( 0.05, 0.35, clamp( f * f * 2.0 + f2 * 0.4, 0.0, 1.0 ) );
+
+    vec3 color = hsl2rgb( vec3( hue, sat, light ) );
+
+    // Blue-ish glow on bright areas.
+    float glow = clamp( f * 1.5 - 0.3, 0.0, 1.0 ) * 0.3;
+    color += glow * vec3( 0.7, 0.8, 1.0 );
+
+    // Soft vignette (brighter center).
+    float vig = smoothstep( 0.0, 1.0, 1.0 - length( uv - 0.5 ) * 1.4 );
+    color *= mix( 0.8, 1.0, vig );
+
+    // Sparkle on the brightest regions.
+    float sparkle = smoothstep( 0.6, 0.8, f ) * 0.2;
+    color += sparkle * vec3( 0.9, 0.95, 1.0 );
+
+    // Composite over the deep background.
+    float alpha = smoothstep( 0.05, 0.4, f ) * 0.25 + 0.08;
+    vec3 finalColor = mix( backgroundColor, color, alpha );
+    finalColor = mix( finalColor, finalColor * 1.2, alpha * 0.3 );
+
+    gl_FragColor = vec4( finalColor, 1.0 );
+}
+</script>
+
+<!-- ── Runtime ─────────────────────────────────────────────────── -->
+<script>
+(function () {
+  "use strict";
+
+  // ── CONFIG ───────────────────────────────────────────────────
+  var CONFIG = {
+    maxPixelRatio: 2,    // cap DPR so 4K/retina screens stay fast.
+    timeScale:     1.0,  // playback speed of the animation.
+    pauseOffscreen: true // stop rendering when the canvas isn't visible.
+  };
+
+  var canvas = document.getElementById("bluesupreme");
+  var gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+  if (!gl) {
+    canvas.replaceWith(Object.assign(document.createElement("div"), {
+      textContent: "WebGL is not supported in this browser.",
+      style: "color:#7af;font:14px sans-serif;padding:1rem;"
+    }));
+    return;
+  }
+
+  function compile(type, src) {
+    var s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error("Shader compile error:\n" + gl.getShaderInfoLog(s));
+      gl.deleteShader(s);
+      return null;
+    }
+    return s;
+  }
+
+  var vs = compile(gl.VERTEX_SHADER,   document.getElementById("vert").textContent);
+  var fs = compile(gl.FRAGMENT_SHADER, document.getElementById("frag").textContent);
+  var program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error("Program link error:\n" + gl.getProgramInfoLog(program));
+    return;
+  }
+  gl.useProgram(program);
+
+  // Fullscreen triangle (covers the viewport with one primitive).
+  var buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  var loc = gl.getAttribLocation(program, "a_pos");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  var uRes  = gl.getUniformLocation(program, "u_resolution");
+  var uTime = gl.getUniformLocation(program, "u_time");
+
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, CONFIG.maxPixelRatio);
+    var w = Math.floor(canvas.clientWidth  * dpr);
+    var h = Math.floor(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+  }
+  window.addEventListener("resize", resize);
+
+  // Visibility gating: don't burn cycles when not on screen.
+  var onScreen = true;
+  if (CONFIG.pauseOffscreen && "IntersectionObserver" in window) {
+    new IntersectionObserver(function (e) { onScreen = e[0].isIntersecting; })
+      .observe(canvas);
+  }
+
+  var start = performance.now();
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (!onScreen || document.hidden) return;
+    resize();
+    gl.uniform2f(uRes, canvas.width, canvas.height);
+    gl.uniform1f(uTime, ((now - start) * 0.001) * CONFIG.timeScale);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
