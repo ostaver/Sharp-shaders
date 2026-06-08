@@ -1,11 +1,5 @@
-// ─────────────────────────────────────────────────────────────
-//  NEON — flowing neon tubes over a detailed procedural field.
-//  Background: domain-warped fBm noise (no grid/blocks).
-//  Shadertoy format: mainImage( out fragColor, in fragCoord )
-// ─────────────────────────────────────────────────────────────
-
-// Iridescent neon palette.
-// Cheap, smooth, and loops naturally over t.
+#define BACK_DETAIL 4 //Increase or decrease for more/less detail.
+#define TUBES 4 //Increase or decrease for more/less tubes.
 vec3 neonPalette( float t ) {
     vec3 a = vec3( 0.55, 0.40, 0.55 );
     vec3 b = vec3( 0.45, 0.45, 0.55 );
@@ -15,8 +9,6 @@ vec3 neonPalette( float t ) {
 }
 
 // Glow of a single horizontal neon tube positioned at wave(x).
-// Returns an intensity that spikes sharply at the line and falls
-// off smoothly, giving the soft bloom that reads as "neon".
 float neonLine( vec2 uv, float wave, float thickness ) {
     float dist = abs( uv.y - wave );
     // Core glow: inverse distance falloff, clamped for a bright core.
@@ -24,7 +16,6 @@ float neonLine( vec2 uv, float wave, float thickness ) {
 }
 
 // Animated wave shape for a tube, parameterised by a phase offset
-// so each tube drifts independently.
 float waveShape( float x, float t, float phase ) {
     return  0.18 * sin( x * 2.4 + t * 1.1 + phase )
           + 0.10 * sin( x * 5.1 - t * 0.7 + phase * 1.7 )
@@ -32,8 +23,7 @@ float waveShape( float x, float t, float phase ) {
 }
 
 // ── Procedural detail background ───────────────────────────────
-// Hash → value noise → fBm → domain warping. This builds up a
-// detailed, organic neon field per fragment (no blocky grid).
+// Hash → value noise → fBm → domain warping. This builds up a detailed fragment.
 
 float hash( vec2 p ) {
     p = fract( p * vec2( 123.34, 456.21 ) );
@@ -60,7 +50,7 @@ float fbm( vec2 p ) {
     float sum = 0.0;
     float amp = 0.5;
     mat2  rot = mat2( 0.8, -0.6, 0.6, 0.8 );   // rotate each octave
-    for ( int i = 0; i < 6; i++ ) {
+    for ( int i = 0; i < BACK_DETAIL; i++ ) {
         sum += amp * valueNoise( p );
         p    = rot * p * 2.0;
         amp *= 0.5;
@@ -102,7 +92,6 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     col += detailBackground( uv, t );
 
     // ── Neon tubes ──────────────────────────────────────────────
-    const int TUBES = 4;
     for ( int i = 0; i < TUBES; i++ ) {
         float fi    = float( i );
         float phase = fi * 1.7;
