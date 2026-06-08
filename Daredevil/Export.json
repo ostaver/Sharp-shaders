@@ -1,0 +1,34 @@
+{
+ "ver": "0.1",
+ "info": {
+  "id": "s3j3Wc",
+  "date": "1780344951",
+  "viewed": 20,
+  "name": "Daredevil",
+  "description": "Sharp shader that also simulates a blender color ramp with noise texture. Smooth, elegant, minimalistic.",
+  "likes": 0,
+  "published": "Public",
+  "usePreview": 0,
+  "tags": [
+   "sharpdark"
+  ],
+  "hasliked": 0,
+  "parentid": "",
+  "parentname": ""
+ },
+ "renderpass": [
+  {
+   "inputs": [],
+   "outputs": [
+    {
+     "id": "4dfGRr",
+     "channel": 0
+    }
+   ],
+   "code": "#define ITER 4 //Detail, higher number = better but harder to load\n#define SPEED 4.0 //Speed\n#define GRAIN 0.08  // Grain/Noise filter\n#define BRIGHTNESS 1.4 //Exposure\n\nfloat hash(vec2 p) {\n    p = fract(p * vec2(443.897, 441.423));\n    p += dot(p, p + 45.32);\n    return fract(p.x * p.y);\n}\n\nfloat noise(vec2 p) {\n    vec2 i = floor(p);\n    vec2 f = fract(p);\n    f = f * f * (3.0 - 2.0 * f);\n    \n    return mix(\n        mix(hash(i + vec2(0.0, 0.0)), hash(i + vec2(1.0, 0.0)), f.x),\n        mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x),\n        f.y\n    );\n}\n\nfloat fbm(vec2 p) {\n    float v = 0.0;\n    float a = 0.5;\n    float f = 1.0;\n    mat2 rot = mat2(0.877, 0.479, -0.479, 0.877);\n    \n    for(int i = 0; i < ITER; i++) {\n        v += a * noise(p * f);\n        f *= 2.0;\n        a *= 0.5;\n        p *= rot;\n    }\n    return v;\n}\n\nfloat scene(vec2 p, float t) {\n    t *= SPEED;\n    \n    float t1 = t * 0.03;\n    float t2 = t * 0.04;\n    float t3 = t * 0.025;\n    float t4 = t * 0.03;\n    \n    vec2 q = vec2(\n        fbm(p + vec2(0.0, t1)),\n        fbm(p + vec2(t2, 3.7))\n    );\n    \n    vec2 r = vec2(\n        fbm(p + 3.8 * q + vec2(1.9, 8.2) + t3),\n        fbm(p + 3.8 * q + vec2(7.3, 2.1) + t4)\n    );\n    \n    return fbm(p + 4.2 * r);\n}\n\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = (fragCoord - 0.5 * iResolution.xy) / min(iResolution.x, iResolution.y);\n    vec2 p = uv * 3.5;\n    \n    float n = scene(p, iTime);\n    \n    // Color\n    float hue = fract(0.889 + n * 0.08);\n    float sat = 0.35 + n * 0.35;\n    float lum = 0.06 + n * 0.13;\n    \n    vec3 rgb = clamp(\n        abs(mod(hue * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0,\n        0.0, 1.0\n    );\n    vec3 col = lum + sat * (rgb - 0.5) * (1.0 - abs(2.0 * lum - 1.0));\n    \n    // Vignette\n    vec2 vig_uv = fragCoord / iResolution.xy - 0.5;\n    float vig = 1.0 - dot(vig_uv, vig_uv) * 1.5;\n    col *= max(vig, 0.0);\n    \n    // VISIBLE GRAIN - using fragCoord directly for pixel-level noise\n    // Method 1: Raw pixel noise\n    float grain = hash(fragCoord) * GRAIN;\n    \n    // Method 2: Animated grain (comment out method 1 and uncomment this to test)\n    // float grain = hash(fragCoord + vec2(iTime * 60.0, iTime * 40.0)) * GRAIN;\n    \n    // Mix grain with color (additive blend)\n    col = mix(col, col + grain, 0.3);  // 30% blend\n    \n    // Or try overlay-style grain (more natural)\n    // col = col + (grain - GRAIN * 0.5) * 0.3;\n    \n    fragColor = vec4(col, 1.0) * BRIGHTNESS;\n}",
+   "name": "Image",
+   "description": "",
+   "type": "image"
+  }
+ ]
+}

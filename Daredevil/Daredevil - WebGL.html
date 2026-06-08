@@ -1,0 +1,203 @@
+<!-- TEMPLATE FOR WEB-SITE USE-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Daredevil — WebGL</title>
+<!--
+  Daredevil — optimized, web-ready build of the Shadertoy shader.
+  Self-contained: no dependencies, no build step. Drop into any page.
+
+  Usage as a full-page background:
+    <canvas id="daredevil"></canvas>  +  this script, with CSS position:fixed.
+
+  Tuning knobs live in the fragment shader header (#define) and in the
+  CONFIG block at the bottom of this file.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #0a0204; overflow: hidden; }
+  /* position:fixed turns the canvas into a full-viewport background layer. */
+  #daredevil { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="daredevil"></canvas>
+
+<!-- ── Vertex shader: a single fullscreen triangle ─────────────── -->
+<script id="vert" type="x-shader/x-vertex">
+attribute vec2 a_pos;
+void main() { gl_Position = vec4( a_pos, 0.0, 1.0 ); }
+</script>
+
+<!-- ── Fragment shader: the optimized Daredevil effect ─────────── -->
+<script id="frag" type="x-shader/x-fragment">
+precision highp float;
+
+uniform vec2  u_resolution;
+uniform float u_time;
+
+// Quality / look knobs.
+#define ITER       4     // fBm octaves: higher = more detail, heavier.
+#define SPEED      4.0   // animation speed.
+#define GRAIN      0.08  // film grain amount.
+#define BRIGHTNESS 1.4   // exposure.
+
+float hash( vec2 p ) {
+    p = fract( p * vec2( 443.897, 441.423 ) );
+    p += dot( p, p + 45.32 );
+    return fract( p.x * p.y );
+}
+
+float noise( vec2 p ) {
+    vec2 i = floor( p );
+    vec2 f = fract( p );
+    f = f * f * ( 3.0 - 2.0 * f );
+    return mix(
+        mix( hash( i ),                 hash( i + vec2( 1.0, 0.0 ) ), f.x ),
+        mix( hash( i + vec2( 0.0, 1.0 ) ), hash( i + vec2( 1.0, 1.0 ) ), f.x ),
+        f.y
+    );
+}
+
+float fbm( vec2 p ) {
+    float v = 0.0, a = 0.5, f = 1.0;
+    mat2 rot = mat2( 0.877, 0.479, -0.479, 0.877 );
+    for ( int i = 0; i < ITER; i++ ) {
+        v += a * noise( p * f );
+        f *= 2.0;
+        a *= 0.5;
+        p *= rot;
+    }
+    return v;
+}
+
+// Domain-warped fBm field.
+float scene( vec2 p, float t ) {
+    t *= SPEED;
+    vec2 q = vec2( fbm( p + vec2( 0.0, t * 0.03 ) ),
+                   fbm( p + vec2( t * 0.04, 3.7 ) ) );
+    vec2 r = vec2( fbm( p + 3.8 * q + vec2( 1.9, 8.2 ) + t * 0.025 ),
+                   fbm( p + 3.8 * q + vec2( 7.3, 2.1 ) + t * 0.03 ) );
+    return fbm( p + 4.2 * r );
+}
+
+void main() {
+    vec2 fragCoord = gl_FragCoord.xy;
+    vec2 uv = ( fragCoord - 0.5 * u_resolution ) / min( u_resolution.x, u_resolution.y );
+    vec2 p  = uv * 3.5;
+
+    float n = scene( p, u_time );
+
+    // HSL-style coloring (deep red Daredevil tone).
+    float hue = fract( 0.889 + n * 0.08 );
+    float sat = 0.35 + n * 0.35;
+    float lum = 0.06 + n * 0.13;
+    vec3 rgb = clamp(
+        abs( mod( hue * 6.0 + vec3( 0.0, 4.0, 2.0 ), 6.0 ) - 3.0 ) - 1.0,
+        0.0, 1.0
+    );
+    vec3 col = lum + sat * ( rgb - 0.5 ) * ( 1.0 - abs( 2.0 * lum - 1.0 ) );
+
+    // Vignette.
+    vec2 vig_uv = fragCoord / u_resolution - 0.5;
+    col *= max( 1.0 - dot( vig_uv, vig_uv ) * 1.5, 0.0 );
+
+    // Film grain (additive blend).
+    float grain = hash( fragCoord ) * GRAIN;
+    col = mix( col, col + grain, 0.3 );
+
+    gl_FragColor = vec4( col, 1.0 ) * BRIGHTNESS;
+}
+</script>
+
+<!-- ── Runtime ─────────────────────────────────────────────────── -->
+<script>
+(function () {
+  "use strict";
+
+  // ── CONFIG ───────────────────────────────────────────────────
+  var CONFIG = {
+    maxPixelRatio: 2,    // cap DPR so 4K/retina screens stay fast.
+    timeScale:     1.0,  // playback speed of the animation.
+    pauseOffscreen: true // stop rendering when the canvas isn't visible.
+  };
+
+  var canvas = document.getElementById("daredevil");
+  var gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+  if (!gl) {
+    canvas.replaceWith(Object.assign(document.createElement("div"), {
+      textContent: "WebGL is not supported in this browser.",
+      style: "color:#f33;font:14px sans-serif;padding:1rem;"
+    }));
+    return;
+  }
+
+  function compile(type, src) {
+    var s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error("Shader compile error:\n" + gl.getShaderInfoLog(s));
+      gl.deleteShader(s);
+      return null;
+    }
+    return s;
+  }
+
+  var vs = compile(gl.VERTEX_SHADER,   document.getElementById("vert").textContent);
+  var fs = compile(gl.FRAGMENT_SHADER, document.getElementById("frag").textContent);
+  var program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error("Program link error:\n" + gl.getProgramInfoLog(program));
+    return;
+  }
+  gl.useProgram(program);
+
+  // Fullscreen triangle (covers the viewport with one primitive).
+  var buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  var loc = gl.getAttribLocation(program, "a_pos");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  var uRes  = gl.getUniformLocation(program, "u_resolution");
+  var uTime = gl.getUniformLocation(program, "u_time");
+
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, CONFIG.maxPixelRatio);
+    var w = Math.floor(canvas.clientWidth  * dpr);
+    var h = Math.floor(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+  }
+  window.addEventListener("resize", resize);
+
+  // Visibility gating: don't burn cycles when not on screen.
+  var onScreen = true;
+  if (CONFIG.pauseOffscreen && "IntersectionObserver" in window) {
+    new IntersectionObserver(function (e) { onScreen = e[0].isIntersecting; })
+      .observe(canvas);
+  }
+
+  var start = performance.now();
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (!onScreen || document.hidden) return;
+    resize();
+    gl.uniform2f(uRes, canvas.width, canvas.height);
+    gl.uniform1f(uTime, ((now - start) * 0.001) * CONFIG.timeScale);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
