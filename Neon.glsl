@@ -1,11 +1,10 @@
-// GLSL Neon project, language similar to C
 // ─────────────────────────────────────────────────────────────
 //  NEON — flowing neon tubes over a detailed procedural field.
 //  Background: domain-warped fBm noise (no grid/blocks).
 //  Shadertoy format: mainImage( out fragColor, in fragCoord )
 // ─────────────────────────────────────────────────────────────
 
-// Iridescent neon palette (cosine gradient, Inigo Quilez technique).
+// Iridescent neon palette.
 // Cheap, smooth, and loops naturally over t.
 vec3 neonPalette( float t ) {
     vec3 a = vec3( 0.55, 0.40, 0.55 );
