@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iridescent Lattice</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; background:#000; overflow:hidden; }
+  canvas { position:fixed; inset:0; width:100vw; height:100vh; display:block; touch-action:none; }
+  #fallback {
+    position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+    text-align:center; padding:2rem; background:#000; color:#9cf;
+    font:14px/1.5 ui-monospace, monospace;
+  }
+  #hud {
+    position:fixed; top:10px; left:10px; display:none; white-space:pre;
+    color:#9cf; font:12px/1.4 ui-monospace, monospace; pointer-events:none; opacity:0.85;
+  }
+</style>
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+<div id="fallback">Your browser doesn't support WebGL.<br>Try a recent version of Chrome, Firefox, Edge or Safari.</div>
+<div id="hud"></div>
+<script>
+(() => {
+  // ---------------------------------------------------------------
+  // Context: prefer WebGL2 (it still happily compiles the GLSL ES 1.00
+  // shader below — WebGL2 implementations are required to support ES
+  // 1.00 when no #version pragma is present), fall back to WebGL1.
+  // ---------------------------------------------------------------
+  const canvas = document.getElementById('glcanvas');
+  const fallbackEl = document.getElementById('fallback');
+  const hudEl = document.getElementById('hud');
+
+  const glOpts = {
+    alpha: false,          // no need to composite with the page behind it
+    antialias: false,      // MSAA is wasted on a procedural/grain-post shader
+    depth: false,          // one fullscreen triangle, no depth testing needed
+    stencil: false,
+    desynchronized: true,  // skip extra compositor sync where the browser supports it
+    powerPreference: 'high-performance',
+    preserveDrawingBuffer: false
+  };
+
+  let gl = canvas.getContext('webgl2', glOpts)
+        || canvas.getContext('webgl', glOpts)
+        || canvas.getContext('experimental-webgl', glOpts);
+
+  if (!gl) {
+    fallbackEl.style.display = 'flex';
+    return;
+  }
+
+  // ---------------------------------------------------------------
+  // Shaders
+  // ---------------------------------------------------------------
+  const VERT_SRC = `
+    attribute vec2 aPos;
+    void main() {
+      // One oversized triangle covering the viewport — cheaper than a
+      // two-triangle quad (3 vertices instead of 6, no diagonal seam).
+      gl_Position = vec4(aPos, 0.0, 1.0);
+    }
+  `;
+
+  const FRAG_SRC = `
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+      precision highp float;
+    #else
+      precision mediump float;
+    #endif
+
+    #define PI 3.14159265
+
+    uniform float iTime;
+    uniform vec2  iResolution;
+    uniform int   uSteps;       // adaptive raymarch step budget, set from JS
+
+    // ===================== PARAMETERS ===========================
+    const int   MAX_STEPS    = 64;     // hard cap; uSteps can only go lower
+    const float MAX_DIST     = 32.0;
+
+    const vec3  PAL_A        = vec3(0.50, 0.50, 0.50);
+    const vec3  PAL_B        = vec3(0.50, 0.50, 0.50);
+    const vec3  PAL_C        = vec3(1.00, 1.00, 1.00);
+    const vec3  PAL_D        = vec3(0.10, 0.40, 0.55);
+
+    const float CELL_SIZE    = 1.2;
+    const float TWIST_DEPTH  = 0.14;
+    const float TWIST_TIME   = 0.2;
+    const float TWIST_VERT   = 0.06;
+    const float SMOOTH_K     = 0.35;
+
+    const float GLOW_STR     = 0.016;
+    const float GLOW_TIGHT   = 0.006;
+    const float AA_NEAR      = 0.45;
+    const float AA_FAR       = 0.06;
+    const float FADE_DENSITY = 0.075;
+    const float LATTICE_GAIN = 0.055;
+
+    const float RIBBON_COUNT = 8.0;
+    const float RIBBON_CORE  = 0.010;
+    const float RIBBON_GAIN  = 0.15;
+
+    const float CAM_SPEED    = 0.85;
+
+    const float EXPOSURE     = 1.35;
+    const float SATURATION   = 1.20;
+    const float VIGNETTE     = 0.35;
+    const float GRAIN_AMT    = 0.018;
+    const float GAMMA        = 0.4545;
+    // ============================================================
+
+    vec3 palette(in float t) {
+        return PAL_A + PAL_B * cos(2.0 * PI * (PAL_C * t + PAL_D));
+    }
+
+    mat2 rot(float a) {
+        float c = cos(a), s = sin(a);
+        return mat2(c, -s, s, c);
+    }
+
+    float hash21(vec2 p) {
+        p = fract(p * vec2(123.34, 345.45));
+        p += dot(p, p + 34.345);
+        return fract(p.x * p.y);
+    }
+
+    float smin(float a, float b, float k) {
+        float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+        return mix(b, a, h) - k * h * (1.0 - h);
+    }
+
+    float lattice(vec3 p) {
+        p.xy *= rot(p.z * TWIST_DEPTH + iTime * TWIST_TIME);
+        p.xz *= rot(p.y * TWIST_VERT);
+
+        vec3 q = mod(p + CELL_SIZE * 0.5, CELL_SIZE) - CELL_SIZE * 0.5;
+
+        float dx = length(q.yz);
+        float dy = length(q.xz);
+        float dz = length(q.xy);
+        return smin(dx, smin(dy, dz, SMOOTH_K), SMOOTH_K);
+    }
+
+    vec3 marchLattice(vec3 ro, vec3 rd, float dither) {
+        vec3 col = vec3(0.0);
+        float t = 0.15 + dither * 0.35;
+
+        for (int i = 0; i < MAX_STEPS; i++) {
+            if (i >= uSteps) break;
+
+            vec3 p = ro + rd * t;
+            float d = lattice(p);
+
+            float aa = AA_NEAR + AA_FAR * t;
+            float dd = d / aa;
+            float g = GLOW_STR / (GLOW_TIGHT + dd * dd);
+
+            float tone = 0.14 * t + 0.18 * p.z + 0.12 * sin(p.x * 0.4 + p.y * 0.3) + 0.08 * iTime;
+            vec3 c = palette(tone);
+
+            float fade = exp(-t * FADE_DENSITY);
+            col += c * g * fade;
+
+            t += clamp(d * 0.6, 0.035, 1.4);
+            if (t > MAX_DIST) break;
+        }
+
+        return col * LATTICE_GAIN;
+    }
+
+    vec3 ribbons(vec2 uv) {
+        vec3 col = vec3(0.0);
+
+        for (float i = 0.0; i < RIBBON_COUNT; i++) {
+            float fi = i / RIBBON_COUNT;
+
+            float amp   = 0.32 * (0.5 + 0.5 * sin(iTime * 0.7 + i * 1.7)) * (1.0 - 0.4 * fi);
+            float freq  = 1.4 + i * 0.55;
+            float phase = iTime * (0.30 + 0.16 * i);
+
+            float y = uv.y + amp * sin(freq * uv.x + phase) + (fi - 0.5) * 0.7;
+            float glow = RIBBON_CORE / (RIBBON_CORE + y * y);
+
+            vec3 c = palette(0.45 * uv.x + fi - 0.20 * iTime);
+
+            float taper = smoothstep(1.7, 0.4, abs(uv.x));
+            col += c * glow * taper;
+        }
+
+        return col * RIBBON_GAIN;
+    }
+
+    void main() {
+        vec2 fragCoord = gl_FragCoord.xy;
+        vec2 uv = (2.0 * fragCoord - iResolution.xy) / iResolution.y;
+        float tt = iTime;
+
+        vec3 ro = vec3(0.0, 0.0, tt * CAM_SPEED);
+        ro.xy += 0.30 * vec2(sin(tt * 0.31), cos(tt * 0.24));
+
+        vec3 fwd   = normalize(vec3(0.10 * sin(tt * 0.20), 0.10 * cos(tt * 0.17), 1.0));
+        vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), fwd));
+        vec3 up    = cross(fwd, right);
+
+        float roll = 0.20 * sin(tt * 0.13);
+        vec2 ruv = uv * rot(roll);
+        vec3 rd = normalize(ruv.x * right + ruv.y * up + 1.45 * fwd);
+
+        float dither = hash21(fragCoord);
+        vec3 col = marchLattice(ro, rd, dither);
+        col += ribbons(uv);
+
+        col = vec3(1.0) - exp(-col * EXPOSURE);
+
+        float luma = dot(col, vec3(0.299, 0.587, 0.114));
+        col = mix(vec3(luma), col, SATURATION);
+
+        float vig = 1.0 - VIGNETTE * dot(uv * 0.62, uv * 0.62);
+        col *= clamp(vig, 0.0, 1.0);
+
+        float grain = hash21(fragCoord + fract(tt) * 311.7) - 0.5;
+        col += grain * GRAIN_AMT;
+
+        col = pow(max(col, 0.0), vec3(GAMMA));
+
+        gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+
+  function compile(type, src) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      const log = gl.getShaderInfoLog(sh);
+      gl.deleteShader(sh);
+      throw new Error('Shader compile error: ' + log);
+    }
+    return sh;
+  }
+
+  function buildProgram() {
+    const vs = compile(gl.VERTEX_SHADER, VERT_SRC);
+    const fs = compile(gl.FRAGMENT_SHADER, FRAG_SRC);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      const log = gl.getProgramInfoLog(prog);
+      throw new Error('Program link error: ' + log);
+    }
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    return prog;
+  }
+
+  let program, aPosLoc, uTimeLoc, uResLoc, uStepsLoc, vbo;
+
+  function initGL() {
+    program = buildProgram();
+    gl.useProgram(program);
+
+    // Cache locations once instead of looking them up every frame.
+    aPosLoc   = gl.getAttribLocation(program, 'aPos');
+    uTimeLoc  = gl.getUniformLocation(program, 'iTime');
+    uResLoc   = gl.getUniformLocation(program, 'iResolution');
+    uStepsLoc = gl.getUniformLocation(program, 'uSteps');
+
+    vbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1, -1,
+       3, -1,
+      -1,  3
+    ]), gl.STATIC_DRAW);
+
+    gl.enableVertexAttribArray(aPosLoc);
+    gl.vertexAttribPointer(aPosLoc, 2, gl.FLOAT, false, 0, 0);
+  }
+
+  initGL();
+
+  // ---------------------------------------------------------------
+  // Context loss / restore
+  // ---------------------------------------------------------------
+  canvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();
+    if (rafId) cancelAnimationFrame(rafId);
+  }, false);
+
+  canvas.addEventListener('webglcontextrestored', () => {
+    initGL();
+    prevNow = performance.now();
+    rafId = requestAnimationFrame(frame);
+  }, false);
+
+  // ---------------------------------------------------------------
+  // Dynamic resolution + step scaling
+  //
+  // The raymarcher does up to 64 steps of a smooth-min distance field
+  // per pixel — that's the dominant cost, and it's heavy on integrated
+  // and mobile GPUs at full resolution. Instead of one fixed quality
+  // level, the canvas renders at an internal resolution that's a
+  // fraction of its CSS size (renderScale) and the browser upscales it
+  // for free; the per-pixel step budget (steps) is a second lever.
+  // Both adapt from measured frame time, so this same file stays smooth
+  // from a phone GPU up to a 4K desktop display.
+  // ---------------------------------------------------------------
+  const MAX_DPR = 2;
+  const MIN_SCALE = 0.45, MAX_SCALE = 1.0;
+  const MIN_STEPS = 26, MAX_STEPS_RUNTIME = 64;
+  const TARGET_FRAME_MS = 1000 / 55; // aim to stay above ~55fps
+
+  const isCoarsePointer = matchMedia('(pointer: coarse)').matches;
+  let renderScale = isCoarsePointer ? 0.75 : 1.0;
+  let steps = isCoarsePointer ? 48 : 64;
+
+  const frameTimes = [];
+  const SAMPLE_WINDOW = 24;
+  let lastAdapt = 0;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+    const cssW = canvas.clientWidth, cssH = canvas.clientHeight;
+    const w = Math.max(1, Math.round(cssW * dpr * renderScale));
+    const h = Math.max(1, Math.round(cssH * dpr * renderScale));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+  }
+
+  function adaptQuality(now) {
+    if (frameTimes.length < SAMPLE_WINDOW || now - lastAdapt < 500) return;
+    const avg = frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length;
+
+    if (avg > TARGET_FRAME_MS * 1.15) {
+      // Running slow: cut resolution first, then step count.
+      if (renderScale > MIN_SCALE) {
+        renderScale = Math.max(MIN_SCALE, renderScale - 0.1);
+        resize();
+      } else if (steps > MIN_STEPS) {
+        steps = Math.max(MIN_STEPS, steps - 8);
+      }
+      lastAdapt = now;
+    } else if (avg < TARGET_FRAME_MS * 0.85) {
+      // Headroom available: restore steps first, then resolution.
+      if (steps < MAX_STEPS_RUNTIME) {
+        steps = Math.min(MAX_STEPS_RUNTIME, steps + 8);
+      } else if (renderScale < MAX_SCALE) {
+        renderScale = Math.min(MAX_SCALE, renderScale + 0.05);
+        resize();
+      }
+      lastAdapt = now;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Render loop
+  // ---------------------------------------------------------------
+  let simTime = 0;
+  let prevNow = performance.now();
+  let rafId = null;
+
+  function frame(now) {
+    const dt = now - prevNow;
+    prevNow = now;
+    simTime += dt / 1000;
+
+    frameTimes.push(dt);
+    if (frameTimes.length > SAMPLE_WINDOW) frameTimes.shift();
+    adaptQuality(now);
+
+    gl.uniform1f(uTimeLoc, simTime);
+    gl.uniform2f(uResLoc, canvas.width, canvas.height);
+    gl.uniform1i(uStepsLoc, steps);
+
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    if (hudEl.style.display !== 'none') {
+      hudEl.textContent =
+        `fps    ~${(1000 / Math.max(1, dt)).toFixed(0)}\n` +
+        `scale  ${renderScale.toFixed(2)}\n` +
+        `steps  ${steps}\n` +
+        `res    ${canvas.width}x${canvas.height}`;
+    }
+
+    rafId = requestAnimationFrame(frame);
+  }
+
+  // Pause entirely when the tab isn't visible — saves battery/CPU and
+  // avoids a huge dt spike (which would jump the animation) on return.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (rafId) cancelAnimationFrame(rafId);
+    } else {
+      prevNow = performance.now();
+      rafId = requestAnimationFrame(frame);
+    }
+  });
+
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', resize);
+
+  // Toggle a small perf HUD with 'd'.
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'd' || e.key === 'D') {
+      hudEl.style.display = hudEl.style.display === 'none' ? 'block' : 'none';
+    }
+  });
+
+  resize();
+  rafId = requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
