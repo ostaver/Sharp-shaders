@@ -1,10 +1,3 @@
-// ============================================================
-//  PYRE BLOOM
-//  Domain-warped fire and smoke with embers, heat color ramp,
-//  cinematic tonemapping, grain, and chromatic aberration.
-//  ShaderToy image pass — no textures or buffers required.
-// ============================================================
-
 #define FBM_OCTAVES 5
 
 const float NOISE_SCALE          = 2.65;
