@@ -1,0 +1,375 @@
+<!-- TEMPLATE FOR WEB-SITE USE-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Neon Nuance — WebGL</title>
+<!--
+  Neon Nuance — optimized, web-ready build of the Shadertoy shader.
+  Self-contained: no dependencies, no build step. Drop into any page.
+
+  Usage as a full-page background:
+    <canvas id="neon"></canvas>  +  this script, with CSS position:fixed.
+
+  Tuning knobs live in the fragment shader header (#define) and in the
+  CONFIG block at the bottom of this file.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #05030a; overflow: hidden; }
+  /* position:fixed turns the canvas into a full-viewport background layer. */
+  #neon { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="neon"></canvas>
+
+<!-- ── Vertex shader: a single fullscreen triangle ─────────────── -->
+<script id="vert" type="x-shader/x-vertex">
+attribute vec2 a_pos;
+void main() { gl_Position = vec4( a_pos, 0.0, 1.0 ); }
+</script>
+
+<!-- ── Fragment shader: the optimized Neon Nuance effect ───────── -->
+<script id="frag" type="x-shader/x-fragment">
+precision highp float;
+
+uniform vec2 u_resolution;
+uniform float u_time;
+uniform vec2 u_mouse;
+
+// Neon Nuance — Aurora Glass Carousel
+// A single-pass Shadertoy scene: no textures or buffers required.
+
+#define GLASS_PANES 7
+#define PI  3.14159265359
+#define TAU 6.28318530718
+
+float sat(float x) { return clamp(x, 0.0, 1.0); }
+
+mat2 rotate2D(float a)
+{
+    float s = sin(a), c = cos(a);
+    return mat2(c, -s, s, c);
+}
+
+float hash21(vec2 p)
+{
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float valueNoise(vec2 p)
+{
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+
+    return mix(mix(hash21(i),                 hash21(i + vec2(1.0, 0.0)), f.x),
+               mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+
+float fbm(vec2 p)
+{
+    float f = 0.0;
+    float a = 0.5;
+    mat2 m = mat2(0.80, -0.60, 0.60, 0.80);
+
+    for (int i = 0; i < 4; i++) {
+        f += a * valueNoise(p);
+        p = m * p * 2.03 + 7.17;
+        a *= 0.5;
+    }
+    return f;
+}
+
+vec3 neonPalette(float t)
+{
+    vec3 a = vec3(0.50, 0.50, 0.55);
+    vec3 b = vec3(0.50, 0.45, 0.45);
+    vec3 c = vec3(1.00, 1.00, 1.00);
+    vec3 d = vec3(0.02, 0.30, 0.64);
+    return a + b * cos(TAU * (c * t + d));
+}
+
+// The environment is a deep, animated aurora printed behind the glass.
+// Re-evaluating it at shifted coordinates creates texture-free refraction.
+vec3 backdrop(vec2 p, float t)
+{
+    vec2 q = p;
+    q += 0.035 * vec2(sin(q.y * 3.0 + t * 0.23),
+                       cos(q.x * 2.5 - t * 0.19));
+
+    float haze = fbm(q * 2.1 + vec2(t * 0.055, -t * 0.035));
+    vec3 col = mix(vec3(0.009, 0.012, 0.035),
+                   vec3(0.035, 0.025, 0.090),
+                   sat(0.35 + 0.65 * haze - 0.18 * p.y));
+
+    // Slow luminous bodies moving beneath the translucent surface.
+    for (int i = 0; i < 5; i++) {
+        float fi = float(i);
+        float phase = fi * 1.37;
+        vec2 center = vec2(0.58 * sin(t * (0.10 + fi * 0.008) + phase),
+                           0.38 * cos(t * (0.13 - fi * 0.006) + phase * 1.61));
+        center.x += 0.12 * sin(t * 0.21 + phase * 2.0);
+        vec2 delta = p - center;
+        delta.x *= 0.78 + 0.12 * sin(phase);
+        float bloom = exp(-dot(delta, delta) * (4.0 + fi * 0.35));
+        col += neonPalette(fi * 0.17 + t * 0.014) * bloom * (0.22 + 0.04 * fi);
+    }
+
+    // Fine, crossing ribbons keep the background visibly in motion.
+    for (int i = 0; i < 3; i++) {
+        float fi = float(i);
+        float wave = 0.25 * sin(p.x * (1.7 + fi * 0.48) + t * (0.22 + fi * 0.05) + fi * 2.1);
+        wave += (fi - 1.0) * 0.24;
+        float ribbon = 0.006 / (abs(p.y - wave) + 0.025);
+        col += neonPalette(0.18 + fi * 0.23 - t * 0.018) * ribbon * 0.14;
+    }
+
+    // Sparse dust catches light and makes the refraction easier to read.
+    vec2 cell = floor((p + 4.0) * 24.0);
+    vec2 fp = fract((p + 4.0) * 24.0) - 0.5;
+    float dustSeed = hash21(cell);
+    float dust = (1.0 - smoothstep(0.0, 0.075, length(fp))) * step(0.91, dustSeed);
+    col += neonPalette(dustSeed + t * 0.01) * dust * 0.32;
+
+    return col;
+}
+
+float sdRoundBox(vec2 p, vec2 halfSize, float radius)
+{
+    vec2 q = abs(p) - halfSize + radius;
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - radius;
+}
+
+vec2 boxNormal(vec2 p, vec2 halfSize, float radius, float epsilon)
+{
+    vec2 ex = vec2(epsilon, 0.0);
+    vec2 ey = vec2(0.0, epsilon);
+    vec2 n = vec2(sdRoundBox(p + ex, halfSize, radius) - sdRoundBox(p - ex, halfSize, radius),
+                  sdRoundBox(p + ey, halfSize, radius) - sdRoundBox(p - ey, halfSize, radius));
+    return normalize(n + vec2(1e-6, 0.0));
+}
+
+void main()
+{
+    vec2 fragCoord = gl_FragCoord.xy;
+    vec2 uv = (fragCoord - 0.5 * u_resolution) / u_resolution.y;
+    float t = u_time;
+    float aa = 1.5 / u_resolution.y;
+
+    // Mouse movement gently tilts the whole installation. It remains fully
+    // animated when no mouse input is present.
+    vec2 idleLook = 0.035 * vec2(sin(t * 0.13), cos(t * 0.11));
+    vec2 mouseLook = (u_mouse - 0.5 * u_resolution) / u_resolution.y;
+    float hasMouse = step(0.001, dot(u_mouse, u_mouse));
+    vec2 look = mix(idleLook, mouseLook * 0.16, hasMouse);
+    uv += look;
+
+    vec3 col = backdrop(uv, t);
+
+    // A faint architectural grid anchors the otherwise liquid scene.
+    vec2 gridUV = rotate2D(0.18) * (uv + vec2(t * 0.008, 0.0));
+    vec2 gridCell = abs(fract(gridUV * 7.0 + 0.5) - 0.5);
+    float grid = 1.0 - smoothstep(0.0, aa * 10.0, min(gridCell.x, gridCell.y));
+    col += vec3(0.16, 0.25, 0.42) * grid * 0.055;
+
+    // Seven glass cards orbit at different speeds. Each pane refracts a fresh
+    // sample of the environment and then composites it over previous layers.
+    for (int i = 0; i < GLASS_PANES; i++) {
+        float fi = float(i);
+        float phase = fi * TAU / float(GLASS_PANES);
+        float depth = 0.5 + 0.5 * sin(phase + t * 0.19);
+
+        vec2 center = vec2(cos(phase + t * (0.105 + fi * 0.003)),
+                           sin(phase + t * (0.087 - fi * 0.002)));
+        center *= vec2(0.43, 0.265);
+        center += 0.035 * vec2(sin(t * 0.31 + phase * 2.0),
+                               cos(t * 0.27 - phase * 1.7));
+
+        float angle = -0.38 * sin(phase + t * 0.16) + 0.11 * sin(t * 0.37 + fi);
+        vec2 local = rotate2D(angle) * (uv - center);
+        vec2 halfSize = vec2(0.175 + 0.025 * sin(phase * 1.7),
+                             0.105 + 0.018 * cos(phase * 1.3));
+        float radius = 0.038 + 0.012 * depth;
+        float d = sdRoundBox(local, halfSize, radius);
+        float body = 1.0 - smoothstep(-aa, aa, d);
+
+        // Soft contact shadow, visible even where multiple panes overlap.
+        float shadowShape = 1.0 - smoothstep(-0.005, 0.045,
+            sdRoundBox(local - vec2(-0.012, 0.020), halfSize, radius));
+        col *= 1.0 - shadowShape * (1.0 - body) * (0.07 + 0.05 * depth);
+
+        vec2 localNormal = boxNormal(local, halfSize, radius, max(aa * 2.0, 0.001));
+        vec2 worldNormal = rotate2D(-angle) * localNormal;
+        float edge = exp(-abs(d) * (42.0 + 15.0 * depth));
+
+        float frost = fbm(local * 7.5 + vec2(fi * 5.7, t * 0.08));
+        float distortion = (0.012 + 0.018 * depth) * (0.65 + 0.35 * frost);
+        vec2 refractedUV = uv + worldNormal * distortion;
+        refractedUV += 0.008 * vec2(sin(local.y * 34.0 + t + fi),
+                                    cos(local.x * 28.0 - t * 0.8 + fi));
+
+        vec3 glass = backdrop(refractedUV, t);
+        vec3 tint = neonPalette(fi * 0.145 + t * 0.012);
+        glass = mix(glass, tint, 0.075 + 0.055 * frost);
+        glass += vec3(0.10, 0.13, 0.18) * (0.28 + 0.22 * frost);
+
+        // A light sweep and tiny UI-like filament give each pane character.
+        float sweepX = mix(-0.34, 0.34, fract(t * 0.075 + fi * 0.137));
+        float sweep = exp(-pow(abs(local.x + local.y * 0.42 - sweepX) * 24.0, 1.25));
+        float filamentY = -0.038 + 0.014 * sin(local.x * 24.0 + t * 1.2 + fi);
+        float filament = exp(-abs(local.y - filamentY) * 210.0)
+                       * (1.0 - smoothstep(halfSize.x * 0.25, halfSize.x, abs(local.x)));
+
+        float opacity = body * (0.24 + 0.10 * depth + 0.055 * frost);
+        col = mix(col, glass, opacity);
+        col += body * tint * filament * 0.20;
+        col += body * vec3(0.75, 0.90, 1.0) * sweep * (0.035 + 0.045 * depth);
+
+        // Cyan/magenta separation at the rim suggests thin-film glass.
+        float facing = 0.45 + 0.55 * abs(dot(worldNormal, normalize(vec2(0.65, 0.76))));
+        col += edge * body * facing * mix(vec3(0.10, 0.85, 1.15),
+                                          vec3(1.10, 0.12, 0.85),
+                                          0.5 + 0.5 * worldNormal.x) * 0.18;
+        col += (1.0 - smoothstep(0.0, 0.008, abs(d))) * vec3(0.82, 0.94, 1.0) * 0.34;
+    }
+
+    // Central liquid lens: a breathing, imperfect circle that magnifies the
+    // aurora and bends it in the opposite direction from the orbiting panes.
+    vec2 lensP = uv - 0.018 * vec2(sin(t * 0.23), cos(t * 0.29));
+    float lensAngle = atan(lensP.y, lensP.x);
+    float lensRadius = 0.205
+                     + 0.010 * sin(lensAngle * 3.0 + t * 0.72)
+                     + 0.006 * sin(lensAngle * 7.0 - t * 0.51);
+    float lensD = length(lensP) - lensRadius;
+    float lensBody = 1.0 - smoothstep(-aa, aa, lensD);
+    vec2 lensNormal = normalize(lensP + 1e-6);
+    vec2 lensUV = uv - lensP * (0.105 + 0.018 * sin(t * 0.4));
+    lensUV += lensNormal * 0.012 * sin(lensAngle * 5.0 - t * 0.7);
+
+    vec3 lensGlass = backdrop(lensUV, t);
+    float lensFrost = fbm(lensP * 9.0 - vec2(t * 0.06, t * 0.04));
+    lensGlass = mix(lensGlass, neonPalette(0.55 + t * 0.015), 0.055 + lensFrost * 0.035);
+    col = mix(col, lensGlass + vec3(0.035, 0.05, 0.08), lensBody * 0.42);
+
+    float lensRim = exp(-abs(lensD) * 68.0);
+    float lensArc = pow(sat(dot(lensNormal, normalize(vec2(-0.65, 0.76)))), 8.0);
+    vec3 lensColor = mix(vec3(0.05, 0.95, 1.20), vec3(1.15, 0.12, 0.92),
+                         0.5 + 0.5 * sin(lensAngle * 2.0 + t * 0.35));
+    col += lensRim * lensColor * (0.16 + 0.28 * lensArc);
+    col += lensBody * lensArc * vec3(0.75, 0.92, 1.0) * 0.12;
+
+    // Bloom-like tonemapping, cinematic vignette, and display gamma.
+    col = 1.0 - exp(-col * 1.22);
+    float vignette = 1.0 - 0.58 * dot(uv * vec2(0.82, 1.0), uv * vec2(0.82, 1.0));
+    col *= sat(vignette);
+    col += (hash21(fragCoord + fract(t)) - 0.5) / 255.0;
+    col = pow(max(col, 0.0), vec3(0.4545));
+
+    gl_FragColor = vec4(col, 1.0);
+}
+
+</script>
+
+<!-- ── Runtime ─────────────────────────────────────────────────── -->
+<script>
+(function () {
+  "use strict";
+
+  // ── CONFIG ───────────────────────────────────────────────────
+  var CONFIG = {
+    maxPixelRatio: 2,   // cap DPR so 4K/retina screens stay fast.
+    timeScale:     1.0, // playback speed of the animation.
+    pauseOffscreen: true // stop rendering when the canvas isn't visible.
+  };
+
+  var canvas = document.getElementById("neon");
+  var gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+  if (!gl) {
+    canvas.replaceWith(Object.assign(document.createElement("div"), {
+      textContent: "WebGL is not supported in this browser.",
+      style: "color:#f0f;font:14px sans-serif;padding:1rem;"
+    }));
+    return;
+  }
+
+  function compile(type, src) {
+    var s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error("Shader compile error:\n" + gl.getShaderInfoLog(s));
+      gl.deleteShader(s);
+      return null;
+    }
+    return s;
+  }
+
+  var vs = compile(gl.VERTEX_SHADER,   document.getElementById("vert").textContent);
+  var fs = compile(gl.FRAGMENT_SHADER, document.getElementById("frag").textContent);
+  var program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error("Program link error:\n" + gl.getProgramInfoLog(program));
+    return;
+  }
+  gl.useProgram(program);
+
+  // Fullscreen triangle (covers the viewport with one primitive).
+  var buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  var loc = gl.getAttribLocation(program, "a_pos");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  var uRes   = gl.getUniformLocation(program, "u_resolution");
+  var uTime  = gl.getUniformLocation(program, "u_time");
+  var uMouse = gl.getUniformLocation(program, "u_mouse");
+  var pointerX = 0.0, pointerY = 0.0;
+
+  canvas.addEventListener("pointermove", function (event) {
+    var rect = canvas.getBoundingClientRect();
+    pointerX = (event.clientX - rect.left) / rect.width;
+    pointerY = 1.0 - (event.clientY - rect.top) / rect.height;
+  });
+
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, CONFIG.maxPixelRatio);
+    var w = Math.floor(canvas.clientWidth  * dpr);
+    var h = Math.floor(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+  }
+  window.addEventListener("resize", resize);
+
+  // Visibility gating: don't burn cycles when not on screen.
+  var onScreen = true;
+  if (CONFIG.pauseOffscreen && "IntersectionObserver" in window) {
+    new IntersectionObserver(function (e) { onScreen = e[0].isIntersecting; })
+      .observe(canvas);
+  }
+
+  var start = performance.now();
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (!onScreen || document.hidden) return;
+    resize();
+    gl.uniform2f(uRes, canvas.width, canvas.height);
+    gl.uniform1f(uTime, ((now - start) * 0.001) * CONFIG.timeScale);
+    gl.uniform2f(uMouse, pointerX * canvas.width, pointerY * canvas.height);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
